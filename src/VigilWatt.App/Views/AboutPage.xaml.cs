@@ -14,7 +14,6 @@ namespace VigilWatt.App.Views;
 public sealed partial class AboutPage : Page
 {
     // fork 后的自有仓库；上游只作代码来源，不作为项目入口（见 UpdateService 的同类说明）
-    private const string RepoUrl = "https://github.com/MentholTea/vigil-watt";
     private const string ReleasesUrl = "https://github.com/MentholTea/vigil-watt/releases";
     private const string GitHubUrl = "https://github.com/MentholTea/vigil-watt";
 
@@ -142,8 +141,6 @@ public sealed partial class AboutPage : Page
             CheckUpdateButton.IsEnabled = true;
         }
     }
-
-    private void OpenRepo_Click(object sender, RoutedEventArgs e) => OpenUrl(RepoUrl);
 
     private void OpenReleases_Click(object sender, RoutedEventArgs e) => OpenUrl(ReleasesUrl);
 

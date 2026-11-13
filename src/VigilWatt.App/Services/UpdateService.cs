@@ -50,7 +50,22 @@ public sealed class UpdateService
     /// <summary>本次检查实际走通的源（GitHub / Gitee），供界面文案与日志显示。</summary>
     public string SourceName { get; private set; } = "GitHub";
 
-    /// <summary>检查更新。null = 已是最新；两个源都不可达才抛异常，由调用方呈现。</summary>
+    /// <summary>把原始异常翻译成用户能看懂的原因。Velopack 对 403 只抛 HTTP 状态码，界面照抄等于没说。</summary>
+    private static string Describe(Exception ex)
+    {
+        string msg = ex.Message;
+        if (msg.Contains("403") && msg.Contains("rate limit", StringComparison.OrdinalIgnoreCase))
+            return "GitHub 接口调用次数已用尽（匿名每小时 60 次，代理/共享 IP 常见），请稍后再试";
+        if (msg.Contains("403"))
+            return "GitHub 拒绝了本次请求（403）";
+        if (ex is TimeoutException)
+            return msg;
+        if (msg.Contains("No such host") || msg.Contains("actively refused") || msg.Contains("timed out"))
+            return "连不上 GitHub，检查网络或代理";
+        return msg;
+    }
+
+    /// <summary>检查更新。null = 已是最新；源不可达才抛异常，由调用方呈现。</summary>
     public async Task<UpdateInfo?> CheckAsync()
     {
         string githubError;
@@ -63,9 +78,9 @@ public sealed class UpdateService
         }
         catch (Exception ex)
         {
-            githubError = ex.Message;
+            githubError = Describe(ex);
             if (_gitee == null)
-                throw new InvalidOperationException($"GitHub 更新源不可达：{ex.Message}", ex);
+                throw new InvalidOperationException(githubError, ex);
             Log.Warn("GitHub 更新源不可用，回退 Gitee: " + ex.Message);
         }
 
@@ -79,7 +94,7 @@ public sealed class UpdateService
         catch (Exception ex)
         {
             throw new InvalidOperationException(
-                $"GitHub 与 Gitee 都不可达（GitHub：{githubError}；Gitee：{ex.Message}）", ex);
+                $"GitHub 不可达（{githubError}）；Gitee 也不可达（{Describe(ex)}）", ex);
         }
     }
 
