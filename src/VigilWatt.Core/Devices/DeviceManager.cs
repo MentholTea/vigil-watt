@@ -619,13 +619,24 @@ public sealed class DeviceManager : IDisposable
         }
     }
 
+    /// <summary>
+    /// 定时采样。<see cref="DeviceStatus.IsOnline"/> 为 false 但仍在宽限期内时**照常补记**：
+    /// 罗技等 HID++ 插件每分钟都有"接收器整轮无应答→丢弃句柄重开"的瞬时空窗，
+    /// 撞上采样节拍就漏一条，曲线上表现为 20~50 分钟的假断口（真机 3208 条采样里 78 处）。
+    /// 宽限期外的离线不补记 —— 那是真的关机/拔出，编造数据比断口更糟。
+    /// </summary>
+    private static readonly TimeSpan SampleOfflineGrace = TimeSpan.FromMinutes(30);
+
     private void SafeSample()
     {
         try
         {
+            var now = DateTimeOffset.Now;
             foreach (var d in _devices.Values)
             {
-                if (d.IsOnline && d.BatteryPercent.HasValue)
+                bool fresh = d.IsOnline ||
+                    (d.BatteryPercent.HasValue && now - d.LastUpdated <= SampleOfflineGrace);
+                if (fresh && d.BatteryPercent.HasValue)
                     _history.Insert(DeviceCustomizationResolver.ApplyName(d, _settings.DeviceCustomizations));
                 RefreshRemainingTimeEstimate(d, notify: true);
             }

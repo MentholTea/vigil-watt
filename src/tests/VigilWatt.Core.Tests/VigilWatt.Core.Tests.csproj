@@ -99,6 +99,8 @@
     <Compile Include="..\..\VigilWatt.App\Services\WidgetCompat.cs" />
     <!-- 任务栏贴片的定位数学与取值收敛同样是零依赖纯逻辑（只碰 int/Math），定位算错必须能在单测里复现 -->
     <Compile Include="..\..\VigilWatt.App\Services\TaskbarLayout.cs" />
+    <!-- 曲线断档三档分类是纯函数（只碰 TimeSpan/int），画错会让人误判电量走势 -->
+    <Compile Include="..\..\VigilWatt.App\Views\ChartGaps.cs" />
     <Compile Include="..\..\VigilWatt.App\Services\TaskbarBatteryMode.cs" />
     <!-- 选屏逻辑（身份匹配 / 型号兜底 / 目标缺失降级主屏）是纯函数，换显示模式后贴片该去哪必须能单测 -->
     <Compile Include="..\..\VigilWatt.App\Services\MonitorSelection.cs" />

@@ -147,13 +147,15 @@ public sealed partial class StatsPage : Page
         if (key == _chartKey && ChartHost.Children.Count > 0) return;
         _chartKey = key;
 
-        // 断档阈值 = 3×采样间隔（最少 15 分钟）：在线时应按间隔落点，更大间隔几乎肯定是离线/关机
-        var gapBreak = TimeSpan.FromMinutes(Math.Max(15, App.Services.Settings.SampleIntervalMinutes * 3));
+        // 三档：实线阈值 = 3×采样间隔（不少于 30 分钟，采样抖动不该画成裂口）；
+        // 断档阈值 = 4 小时，超过才真断开（关机/拔出），中间画虚线表示推测。
+        var gapSolid = ChartGaps.SolidLimitFor(App.Services.Settings.SampleIntervalMinutes);
+        var gapBreak = ChartGaps.BreakLimit;
         var chart = new BatteryChartControl();
         if (device is null)
         {
             // 没有设备：仍画空坐标系，把所选时间窗显式交给图表（切档位能看出轴在变）
-            chart.SetData(Array.Empty<BatteryChartControl.Series>(), from, to, gapBreak);
+            chart.SetData(Array.Empty<BatteryChartControl.Series>(), from, to, gapBreak, gapSolid);
         }
         else
         {
@@ -165,7 +167,7 @@ public sealed partial class StatsPage : Page
                     Color = UiPalette.SeriesColors[0],
                     Points = samples.Select(s => (s.Timestamp, s.Percent)).ToList(),
                 },
-            }, from, to, gapBreak);
+            }, from, to, gapBreak, gapSolid);
         }
 
         ChartHost.Children.Clear();

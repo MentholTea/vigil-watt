@@ -1,3 +1,4 @@
+using System.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -39,8 +40,10 @@ public sealed class BatteryChartControl : UserControl
 
     private IReadOnlyList<Series> _series = Array.Empty<Series>();
     private DateTimeOffset? _domainStart, _domainEnd;
-    /// <summary>相邻采样间隔超过此值视为断档，折线/面积在中间断开（离线/关机不能假装有电量）。</summary>
-    private TimeSpan _gapBreak = TimeSpan.FromMinutes(15);
+    /// <summary>实线阈值：间隔不超过它视为连续采样（采样抖动不该画成裂口）。</summary>
+    private TimeSpan _gapSolid = ChartGaps.SolidLimit;
+    /// <summary>断档阈值：超过它完全断开，中间那段画虚线（关机/拔出不能连成斜坡）。</summary>
+    private TimeSpan _gapBreak = ChartGaps.BreakLimit;
     private UIElement? _emptyState;
 
     // 最近一次渲染的几何信息，供 hover 反查（pointer x → 时间 → 最近采样点）
@@ -71,12 +74,15 @@ public sealed class BatteryChartControl : UserControl
 
     public void SetData(IReadOnlyList<Series> series,
         DateTimeOffset? domainStart = null, DateTimeOffset? domainEnd = null,
-        TimeSpan? gapBreak = null)
+        TimeSpan? gapBreak = null, TimeSpan? gapSolid = null)
     {
         _series = series;
         _domainStart = domainStart;
         _domainEnd = domainEnd;
         if (gapBreak is { } g && g > TimeSpan.Zero) _gapBreak = g;
+        if (gapSolid is { } s && s > TimeSpan.Zero) _gapSolid = s;
+        // 实线阈值必须小于等于断档阈值，否则分类会互相覆盖
+        if (_gapSolid > _gapBreak) _gapSolid = _gapBreak;
         Render();
     }
 
@@ -164,6 +170,48 @@ public sealed class BatteryChartControl : UserControl
             if (s.Points.Count == 0) continue;
             RenderSeries(s);
         }
+
+        RenderGapHint(axisBrush);
+    }
+
+    /// <summary>
+    /// 有虚线/断开时在右下角补一行说明。虚线段的含义（"这里没采样、是连线推测"）看图画不出来，
+    /// 不写一句用户只会以为是渲染瑕疵。
+    /// </summary>
+    private void RenderGapHint(Brush brush)
+    {
+        int dashed = 0, broken = 0;
+        foreach (var s in _series)
+        {
+            if (s.Points.Count < 2) continue;
+            var segs = ChartGaps.Split(s.Points, p => p.Time, _gapSolid, _gapBreak);
+            for (int k = 1; k < segs.Count; k++)
+            {
+                if (segs[k].Incoming == ChartGaps.Link.Dashed) dashed++;
+                else if (segs[k].Incoming == ChartGaps.Link.Break) broken++;
+            }
+        }
+        if (dashed == 0 && broken == 0) return;
+
+        var sb = new StringBuilder();
+        if (dashed > 0)
+        {
+            double mins = _gapSolid.TotalMinutes;
+            sb.Append($"虚线 {dashed} 段：间隔超过 {mins:0} 分钟无采样，按首尾连线推测");
+        }
+        if (broken > 0)
+        {
+            if (sb.Length > 0) sb.Append("　·　");
+            sb.Append($"断开 {broken} 处：超过 {_gapBreak.TotalHours:0} 小时无采样（关机/拔出）");
+        }
+
+        var hint = MakeLabel(sb.ToString(), brush, 10);
+        hint.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        double w = hint.DesiredSize.Width;
+        // 放右下角、X 轴标签上方一格，避免压住时间刻度
+        Canvas.SetLeft(hint, Math.Max(PadL, _w - PadR - w - 8));
+        Canvas.SetTop(hint, _h - PadB - 16);
+        _canvas.Children.Add(hint);
     }
 
     private void RenderLegend(Brush textBrush)
@@ -218,12 +266,62 @@ public sealed class BatteryChartControl : UserControl
         var areaFill = new SolidColorBrush(Color.FromArgb(38, s.Color.R, s.Color.G, s.Color.B));
         bool drawDots = s.Points.Count <= 40;
 
-        foreach (var seg in SplitByGap(s.Points, _gapBreak))
+        var segments = ChartGaps.Split(
+            s.Points, p => p.Time, _gapSolid, _gapBreak);
+
+        for (int k = 0; k < segments.Count; k++)
         {
-            if (seg.Count == 1)
+            var seg = segments[k];
+            int count = seg.End - seg.Start + 1;
+
+            // 先画"从上一段连过来"的那条线：虚线弱化表示推测，断开则什么都不画
+            if (k > 0 && seg.Incoming != ChartGaps.Link.Break)
             {
-                // 孤立采样：不断档连线，只打点
-                var alone = new Point(TimeToX(seg[0].Time), PctToY(seg[0].Percent));
+                var prevPt = s.Points[segments[k - 1].End];
+                var curPt = s.Points[seg.Start];
+                bool dashed = seg.Incoming == ChartGaps.Link.Dashed;
+                var bridge = new Polyline
+                {
+                    Stroke = stroke,
+                    // 虚线要比实线略细但不能细到看不清（旧 1.5px 在浅色主题几乎消失）
+                    StrokeThickness = dashed ? 2 : 2,
+                    StrokeLineJoin = PenLineJoin.Round,
+                };
+                if (dashed)
+                {
+                    // 长划 + 大间隔：远看就知道"这段是推测"，不是采样断点
+                    bridge.StrokeDashArray = new DoubleCollection { 4, 3 };
+                    bridge.StrokeDashCap = PenLineCap.Round;
+                    bridge.Opacity = 0.85;
+                }
+                bridge.Points.Add(new Point(TimeToX(prevPt.Time), PctToY(prevPt.Percent)));
+                bridge.Points.Add(new Point(TimeToX(curPt.Time), PctToY(curPt.Percent)));
+                _canvas.Children.Add(bridge);
+
+                if (dashed)
+                {
+                    // 虚线中点放一个小空心圈 + 「推测」标签，鼠标扫过就知道这段没采样
+                    double mx = (TimeToX(prevPt.Time) + TimeToX(curPt.Time)) / 2;
+                    double my = (PctToY(prevPt.Percent) + PctToY(curPt.Percent)) / 2;
+                    var ring = new Ellipse
+                    {
+                        Width = 7,
+                        Height = 7,
+                        Stroke = stroke,
+                        StrokeThickness = 1.5,
+                        Fill = new SolidColorBrush(Color.FromArgb(0, 0, 0, 0)),
+                        Opacity = 0.9,
+                    };
+                    Canvas.SetLeft(ring, mx - 3.5);
+                    Canvas.SetTop(ring, my - 3.5);
+                    _canvas.Children.Add(ring);
+                }
+            }
+
+            if (count == 1)
+            {
+                // 孤立采样：只打点，不连线
+                var alone = new Point(TimeToX(s.Points[seg.Start].Time), PctToY(s.Points[seg.Start].Percent));
                 var dot = new Ellipse { Width = 5, Height = 5, Fill = fill };
                 Canvas.SetLeft(dot, alone.X - 2.5);
                 Canvas.SetTop(dot, alone.Y - 2.5);
@@ -232,8 +330,8 @@ public sealed class BatteryChartControl : UserControl
             }
 
             var pts = new PointCollection();
-            foreach (var p in seg)
-                pts.Add(new Point(TimeToX(p.Time), PctToY(p.Percent)));
+            for (int i = seg.Start; i <= seg.End; i++)
+                pts.Add(new Point(TimeToX(s.Points[i].Time), PctToY(s.Points[i].Percent)));
 
             var area = new PointCollection();
             foreach (var pt in pts) area.Add(pt);
@@ -273,7 +371,8 @@ public sealed class BatteryChartControl : UserControl
         _canvas.Children.Add(tip);
     }
 
-    /// <summary>按时间断档拆段。间隔 &gt; gapBreak 的相邻点不连线——关机/离线区间不能画成斜坡。</summary>
+    /// <summary>按时间断档拆段（兼容旧调用）：等价于 <see cref="ChartGaps.Split"/> 的三档拆分，
+    /// 返回的都是"段内实线"的闭区间。新代码请直接用 ChartGaps.Split 拿到连接方式。</summary>
     internal static List<List<(DateTimeOffset Time, int Percent)>> SplitByGap(
         IReadOnlyList<(DateTimeOffset Time, int Percent)> points, TimeSpan gapBreak)
     {
