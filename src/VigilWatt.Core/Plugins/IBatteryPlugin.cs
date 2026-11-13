@@ -46,6 +46,18 @@ public interface IBatteryPlugin
     /// <summary>插件在轮询之外主动推送的状态更新（如罗技 HID++ 电量/充电自发通知）；不推送可永不触发，DeviceManager 订阅后走与 Poll 相同的 Upsert。</summary>
     event Action<DeviceStatus>? StatusPushed;
 
+    /// <summary>
+    /// 历史读数查询（可选注入）：给"充电期间要冻结在最后放电值"的插件用。
+    /// 默认 null 表示不提供，插件自行处理；DeviceManager 启动时统一灌入。
+    /// </summary>
+    Func<string, int?>? LastDischargePercentLookup { get; set; }
+
+    /// <summary>按设备名前缀查历史放电读数（跨通道 ID 不同时关联同一台设备）。可选注入。</summary>
+    Func<string, int?>? LastDischargePercentByNameLookup { get; set; }
+
+    /// <summary>最近一条本品牌放电读数（跨通道 ID 与名字都变了的兜底锚点）。可选注入。</summary>
+    Func<int?>? LastLogitechDischargeLookup { get; set; }
+
     /// <summary>释放打开的句柄并释放全部认领（插件被禁用或退出时调用）。</summary>
     void Detach();
 }

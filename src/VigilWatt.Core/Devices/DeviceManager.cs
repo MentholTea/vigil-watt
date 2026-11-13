@@ -79,6 +79,14 @@ public sealed class DeviceManager : IDisposable
         // 罗技等插件的 HID++ 自发通知（插拔电）不走 60 秒轮询，直接推送
         foreach (var p in _plugins)
             p.StatusPushed += Upsert;
+
+        // 充电期间要冻结在"最后一次放电读数"的插件（罗技，对齐 G HUB 行为）从这里取锚点。
+        foreach (var p in _plugins)
+        {
+            p.LastDischargePercentLookup ??= _history.GetLastDischargePercent;
+            p.LastDischargePercentByNameLookup ??= n => _history.GetLastDischargePercentByName(n, TimeSpan.FromHours(12));
+            p.LastLogitechDischargeLookup ??= () => _history.GetLastLogitechDischargePercent(TimeSpan.FromHours(12));
+        }
     }
 
     /// <summary>反射发现 Core 程序集里的全部插件。新增品牌 = 加一个 IBatteryPlugin 实现类文件，无需改这里。</summary>

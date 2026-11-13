@@ -49,6 +49,20 @@ internal static class HidppCatalog
             : Array.Empty<VoltagePoint>();
     }
 
+    /// <summary>
+    /// 接收器单配机型的 WPID 兜底：配对寄存器 0x83B5 在部分 Lightspeed 接收器上直接返回
+    /// 错误码 06（不支持），拿不到 WPID 就用接收器 PID 反查设备包声明的型号 WPID。
+    /// </summary>
+    public static ushort? WirelessPidForReceiver(ushort receiverPid)
+        => Data.Value.ReceiverModels.TryGetValue(receiverPid, out var wpid) ? wpid : null;
+
+    /// <summary>直连（有线模式）PID → 型号 WPID。插线后本体换 PID 出现，与接收器通道共用同一份模型。</summary>
+    public static ushort? WirelessPidForDirect(ushort directPid)
+        => Data.Value.DirectModels.TryGetValue(directPid, out var wpid) ? wpid : null;
+
+    /// <summary>该直连 PID 属于哪个型号（用于把"无线槽位 + 有线本体"认成同一台设备）。</summary>
+    public static ushort? ModelKeyForDirect(ushort directPid) => WirelessPidForDirect(directPid);
+
     private static CatalogData Load()
     {
         var asm = Assembly.GetExecutingAssembly();
@@ -96,10 +110,34 @@ internal static class HidppCatalog
             }
         }
 
+        var receiverModels = new Dictionary<ushort, ushort>();
+        if (dto.ReceiverModels != null)
+        {
+            foreach (var (key, wpidText) in dto.ReceiverModels)
+            {
+                if (!TryParseHexPid(key, out var receiverPid)) continue;
+                if (TryParseHexPid(wpidText, out var modelWpid))
+                    receiverModels[receiverPid] = modelWpid;
+            }
+        }
+
+        var directModels = new Dictionary<ushort, ushort>();
+        if (dto.DirectModels != null)
+        {
+            foreach (var (key, wpidText) in dto.DirectModels)
+            {
+                if (!TryParseHexPid(key, out var directPid)) continue;
+                if (TryParseHexPid(wpidText, out var modelWpid))
+                    directModels[directPid] = modelWpid;
+            }
+        }
+
         return new CatalogData(
             receivers,
             curves,
             wpidCurves,
+            receiverModels,
+            directModels,
             string.IsNullOrWhiteSpace(dto.DefaultCurve) ? "defaultLithium" : dto.DefaultCurve!,
             string.IsNullOrWhiteSpace(dto.AdcCurve) ? "adcLithium" : dto.AdcCurve!);
     }
@@ -134,6 +172,8 @@ internal static class HidppCatalog
         IReadOnlyDictionary<ushort, ReceiverInfo> Receivers,
         IReadOnlyDictionary<string, IReadOnlyList<VoltagePoint>> Curves,
         IReadOnlyDictionary<ushort, string> WpidCurves,
+        IReadOnlyDictionary<ushort, ushort> ReceiverModels,
+        IReadOnlyDictionary<ushort, ushort> DirectModels,
         string DefaultCurve,
         string AdcCurve);
 
@@ -153,6 +193,14 @@ internal static class HidppCatalog
 
         [JsonPropertyName("wpidCurves")]
         public Dictionary<string, string>? WpidCurves { get; set; }
+
+        /// <summary>接收器 PID → 该接收器单配机型的 WPID（配对寄存器读不到时兜底）。</summary>
+        [JsonPropertyName("receiverModels")]
+        public Dictionary<string, string>? ReceiverModels { get; set; }
+
+        /// <summary>有线模式本体 PID → 型号 WPID（插线后本体换 PID 出现，共用同一份模型）。</summary>
+        [JsonPropertyName("directModels")]
+        public Dictionary<string, string>? DirectModels { get; set; }
     }
 
     private sealed class ReceiverDto

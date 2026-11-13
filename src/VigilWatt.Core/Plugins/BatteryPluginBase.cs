@@ -39,6 +39,15 @@ public abstract class BatteryPluginBase : IBatteryPlugin
     /// <summary>基类默认不推送；被动监听与子类实时事件走 <see cref="RaiseStatusPushed"/>。</summary>
     public event Action<DeviceStatus>? StatusPushed;
 
+    /// <summary>历史读数查询，默认不提供；需要"充电冻结锚点"的插件（罗技）由 DeviceManager 灌入后使用。</summary>
+    public Func<string, int?>? LastDischargePercentLookup { get; set; }
+
+    /// <summary>按设备名前缀查历史放电读数（跨通道 ID 不同时关联同一台设备）。默认不提供。</summary>
+    public Func<string, int?>? LastDischargePercentByNameLookup { get; set; }
+
+    /// <summary>最近一条本品牌放电读数（跨通道 ID 与名字都变了的兜底锚点）。默认不提供。</summary>
+    public Func<int?>? LastLogitechDischargeLookup { get; set; }
+
     /// <summary>供子类/基类被动监听推送轮询外的状态更新。</summary>
     protected void RaiseStatusPushed(DeviceStatus status) => StatusPushed?.Invoke(status);
 

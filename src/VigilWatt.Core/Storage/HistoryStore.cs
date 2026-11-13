@@ -127,6 +127,75 @@ public class HistoryStore : IDisposable
         return list;
     }
 
+    /// <summary>
+    /// 该设备最近一次**放电**采样的电量。充电期间用来当"冻结锚点"——G HUB 插线后不再重算百分比
+    /// （真机 4199mV 仍显示 92%，就是插线前最后那次放电读数），见 docs/hardware/logitech.md §电池模型。
+    /// 无非放电记录返回 null。
+    /// </summary>
+    public int? GetLastDischargePercent(string deviceId)
+    {
+        lock (_writeGate)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText =
+                "SELECT percent FROM samples WHERE device_id = $id AND charging = 0 " +
+                "ORDER BY ts DESC LIMIT 1";
+            cmd.Parameters.AddWithValue("$id", deviceId);
+            var v = cmd.ExecuteScalar();
+            if (v == null || v is DBNull) return null;
+            int pct = Convert.ToInt32(v);
+            return pct is >= 0 and <= 100 ? pct : null;
+        }
+    }
+
+    /// <summary>
+    /// 按设备名前缀找最近一次放电读数。用于"同一台设备换通道后 ID 变了"的场景：
+    /// 无线走接收器（logitech:&lt;接收器哈希&gt;:1），插线走本体直连（logitech:&lt;本体哈希&gt;:255），
+    /// 两个 ID 的哈希源不同、无法互相推导。
+    /// </summary>
+    public int? GetLastDischargePercentByName(string namePrefix, TimeSpan within)
+    {
+        if (string.IsNullOrWhiteSpace(namePrefix)) return null;
+        lock (_writeGate)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText =
+                "SELECT percent FROM samples WHERE device_id LIKE 'logitech:%' AND charging = 0 " +
+                "AND name LIKE $n AND ts >= $since ORDER BY ts DESC LIMIT 1";
+            cmd.Parameters.AddWithValue("$n", namePrefix + "%");
+            cmd.Parameters.AddWithValue("$since", DateTimeOffset.Now.Subtract(within).ToUnixTimeMilliseconds());
+            var v = cmd.ExecuteScalar();
+            if (v == null || v is DBNull) return null;
+            int pct = Convert.ToInt32(v);
+            return pct is >= 0 and <= 100 ? pct : null;
+        }
+    }
+
+    /// <summary>
+    /// 罗技专用：最近一条任意罗技设备的**放电**读数。
+    ///
+    /// 为什么不能按 ID 查：无线走接收器（`logitech:&lt;接收器哈希&gt;:1`），插线走本体直连
+    /// （`logitech:&lt;本体哈希&gt;:255`），两个 ID 的哈希源不同，推不出来。
+    /// 为什么不能按名字查：用户自定义名（"罗技 G502"）与设备自报名（"G502 LIGHTSPEED …"）不一致。
+    /// 本机只有一台罗技外设时，"最近一条放电读数"就是这台设备插线前的真实电量，
+    /// 也正是 G HUB 插线后冻结显示的那个值（docs/hardware/logitech.md §电池模型）。
+    /// </summary>
+    public int? GetLastLogitechDischargePercent(TimeSpan within)
+    {
+        lock (_writeGate)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText =
+                "SELECT percent FROM samples WHERE device_id LIKE 'logitech:%' AND charging = 0 " +
+                "AND ts >= $since ORDER BY ts DESC LIMIT 1";
+            cmd.Parameters.AddWithValue("$since", DateTimeOffset.Now.Subtract(within).ToUnixTimeMilliseconds());
+            var v = cmd.ExecuteScalar();
+            if (v == null || v is DBNull) return null;
+            int pct = Convert.ToInt32(v);
+            return pct is >= 0 and <= 100 ? pct : null;
+        }
+    }
+
     /// <summary>时间范围内有过采样的设备（历史页设备列表用：按库里的数据走，而不是当前在线设备）。
     /// 排序 = 最近有数据的在前。名称取窗口内最新非占位名（见 <see cref="PreferredNameSql"/>）。</summary>
     public List<(string DeviceId, string Name, DateTimeOffset LastSeen)> DistinctDevices(DateTimeOffset since)

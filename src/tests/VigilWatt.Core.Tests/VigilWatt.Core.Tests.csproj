@@ -30,6 +30,16 @@
     依赖只有 Microsoft.Data.Sqlite + AppPaths + Log + DeviceStatus（全是纯 .NET）。
     它靠 HistoryStore(dbPath) 的可选构造参数指向临时库，测试因此不碰真实 history.db。
   -->
+  <!--
+    官方电池模型要跟着链接进来的源文件一起进测试程序集：BatteryModelCatalog 用
+    GetManifestResourceStream 按固定逻辑名取，测试项目不引用 Core 程序集（只 Compile Include），
+    所以必须用 LogicalName 这里补一份同名资源，否则真机数据回归无从跑起。
+  -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\VigilWatt.Core\Plugins\Logitech\battery-models.json"
+                      LogicalName="VigilWatt.Core.Plugins.Logitech.battery-models.json" />
+  </ItemGroup>
+
   <ItemGroup>
     <Compile Include="..\..\VigilWatt.Core\Plugins\Thunderobot\ThunderobotCodec.cs" />
     <Compile Include="..\..\VigilWatt.Core\Plugins\Ajazz\AjazzCodec.cs" />
@@ -57,6 +67,11 @@
     <Compile Include="..\..\VigilWatt.Core\Plugins\Eweadn\EweadnKeyboardCodec.cs" />
     <Compile Include="..\..\VigilWatt.Core\Plugins\Eweadn\EweadnMouseCodec.cs" />
     <Compile Include="..\..\VigilWatt.Core\Plugins\Logitech\HidppCodec.cs" />
+    <!-- 官方电池模型与充电状态机是零依赖纯逻辑（只碰数组/时间），换算错了就是电量显示错，
+         必须能脱离 G HUB 在现场复现（docs/hardware/logitech.md §电池模型） -->
+    <Compile Include="..\..\VigilWatt.Core\Plugins\Logitech\BatteryModel.cs" />
+    <Compile Include="..\..\VigilWatt.Core\Plugins\Logitech\ChargingSolver.cs" />
+    <Compile Include="..\..\VigilWatt.Core\Plugins\Logitech\BatteryModelCatalog.cs" />
     <Compile Include="..\..\VigilWatt.Core\Ble\ClassicDeviceName.cs" />
     <Compile Include="..\..\VigilWatt.Core\Ble\WatcherProps.cs" />
     <Compile Include="..\..\VigilWatt.Core\Models\DeviceKind.cs" />

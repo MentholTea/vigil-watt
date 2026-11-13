@@ -93,19 +93,38 @@ internal static class HidppCodec
         if (millivolts is < 2000 or > 5500) return false;
 
         byte flags = resp[4];
-        if ((flags & 0x80) != 0)
-        {
-            charging = (flags & 0x07) == 1
-                ? ChargingState.Full
-                : ChargingState.Charging;
-        }
-        else
-        {
-            charging = ChargingState.Discharging;
-        }
+        charging = ParseVoltageFlags(flags);
 
         percent = PercentFromMillivolts(millivolts, curve);
         return percent > 0 || millivolts <= curveFloor(curve);
+    }
+
+    /// <summary>
+    /// 只取 0x1001 的毫伏与充电态，不做电压→百分比换算：换算交给官方电池模型（<see cref="BatteryModel"/>）。
+    /// flags 编码按 OpenLogi 逆向的 0x1001 定义：bit7=外部供电，低 3 位=充电档位（0 充电 / 1 充满 / 2 未充电）。
+    /// </summary>
+    public static bool TryParseVoltageOnly(
+        ReadOnlySpan<byte> resp, out int millivolts, out ChargingState charging)
+    {
+        millivolts = 0;
+        charging = ChargingState.Unknown;
+        if (resp.Length < 5) return false;
+        millivolts = (resp[2] << 8) | resp[3];
+        if (millivolts is < 2000 or > 5500) return false;
+        charging = ParseVoltageFlags(resp[4]);
+        return true;
+    }
+
+    /// <summary>0x1001 flags：bit7 外部供电；低 3 位 <c>0</c>=充电中、<c>1</c>=充满、<c>2</c>=未充电（接电但不充）。</summary>
+    public static ChargingState ParseVoltageFlags(byte flags)
+    {
+        if ((flags & 0x80) == 0) return ChargingState.Discharging;
+        return (flags & 0x07) switch
+        {
+            0 => ChargingState.Charging,
+            1 => ChargingState.Full,
+            _ => ChargingState.Discharging,
+        };
     }
 
     /// <summary>ADC Measurement (0x1F20) 参数：大端毫伏 + flags（0x01 放电 / 0x03 充电 / 0x07 充满）。</summary>

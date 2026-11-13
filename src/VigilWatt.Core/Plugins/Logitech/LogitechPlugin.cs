@@ -29,6 +29,18 @@ public sealed class LogitechPlugin : IBatteryPlugin
     /// <summary>空槽 Ping 超时后的负缓存：冷却期内不再写、不等（CR-62）。</summary>
     private static readonly TimeSpan EmptySlotCooldown = TimeSpan.FromMinutes(5);
 
+    /// <summary>历史读数查询：冷启动插着线时，靠它拿到插线前的放电值当冻结锚点。</summary>
+    public Func<string, int?>? LastDischargePercentLookup { get; set; }
+
+    /// <summary>按设备名前缀查历史放电读数：跨通道（无线↔有线）ID 不同时用它关联同一台设备。</summary>
+    public Func<string, int?>? LastDischargePercentByNameLookup { get; set; }
+
+    /// <summary>最近一条罗技放电读数：跨通道 ID/名字都变了时的最后兜底锚点来源。</summary>
+    public Func<int?>? LastLogitechDischargeLookup { get; set; }
+
+    /// <summary>锚点回看窗口：超过这么久没有放电记录就认为不可信，不再沿用。</summary>
+    private static readonly TimeSpan AnchorLookback = TimeSpan.FromHours(12);
+
     /// <summary>插件开关的键，与 <c>AppSettings.PluginEnabled</c> 对应（插件开关即写入开关，见 <see cref="WritesEnabled"/>）。</summary>
     public const string SettingsKey = "Logitech";
 
@@ -59,6 +71,12 @@ public sealed class LogitechPlugin : IBatteryPlugin
 
     /// <summary>熔断阈值：连续这么多次查询无应答就停写。</summary>
     private const int MaxConsecutiveFailures = 3;
+
+    /// <summary>读数跳变上限（百分点）：与其它插件同档。充电瞬间的极化跳变应由电池模型消化，不该靠这个兜。</summary>
+    private const int MaxStepPercent = 15;
+
+    /// <summary>跳变需要持续这么久才被采信为真实变化。</summary>
+    private static readonly TimeSpan FilterPersistWindow = TimeSpan.FromMinutes(3);
 
     /// <summary>
     /// 接口打开失败的退避期（固定值，与查询失败的递增退避无关）。接口**仍在位但打不开**
@@ -103,6 +121,21 @@ public sealed class LogitechPlugin : IBatteryPlugin
         public bool WritesDisabled;         // 熔断停写中
         public DateTimeOffset WritesDisabledAt;
         public int BreakerTrips;            // 熔断次数 = 递增退避档位
+
+        /// <summary>官方电池模型（按 WPID 命中）；null 时退回旧电压曲线。</summary>
+        public BatteryModel? Model;
+
+        /// <summary>有模型时的充电求解器；只在充电态使用，拔线即 Reset。</summary>
+        public ChargingSolver? Solver;
+
+        /// <summary>
+        /// 最近一次**放电**读数。GHUB 插线后冻结在它上面（真机 4199mV 仍显示 92%），
+        /// 所以充电期间必须拿它当锚点，不能用充电表重算。见 docs/hardware/logitech.md §电池模型。
+        /// </summary>
+        public int LastDischargePercent = -1;
+
+        /// <summary>读数跳变过滤器：罗技此前没接，导致充电瞬间的 +49 点原样上屏。</summary>
+        public BatteryReadingFilter? Filter;
     }
 
     private sealed class ReceiverSession
@@ -225,17 +258,44 @@ public sealed class LogitechPlugin : IBatteryPlugin
         return gone;
     }
 
+    /// <summary>
+    /// 直连设备（插数据线/无线关机后走 USB）的 fixed 槽位号。本体只对 <c>0xFF</c> 应答，
+    /// 若先去扫 1..6 会被本体的"任意 devIdx 都应答"骗成 6 台（真机 2026-11-06 14:49）。
+    /// </summary>
+    private const byte DirectDeviceSlot = 0xFF;
+
     private void DiscoverDevices(ReceiverSession session)
     {
         var io = session.Io!;
         bool initial = !session.InitialScanDone;
         int probesThisPass = 0;
 
-        // 永久移除的设备：不再 ping 它的槽位，已跟踪的也一并丢掉
-        foreach (var idx in session.Devices.Keys.Where(k => DeviceBlocklist.IsBlocked(SlotId(session, k))).ToList())
+        // 永久移除的设备：不再 ping 它的槽位，已跟踪的也一并丢掉。
+        // 设备已建立后 ID 可能是型号式（logitech:model:XXXX），两套 ID 都要判。
+        foreach (var idx in session.Devices.Keys
+                     .Where(k => IsAnyIdBlocked(session, k, session.Devices[k].WirelessPid)).ToList())
         {
             session.Devices.Remove(idx);
             Log.Info($"罗技设备已永久移除，停止轮询 devIdx={idx}");
+        }
+
+        // 先判直连：本体对 0xFF 应答，且对 1..6 也会应答 —— 必须先确认直连，再决定要不要扫槽位，
+        // 否则同一只鼠标会被登记成 devIdx=1..6 六台（名字全是"罗技设备 N"，电量充电态完全相同）。
+        if (!session.DirectDevice && session.Devices.Count == 0 && initial)
+        {
+            bool allowDirect = !session.EmptySlotUntil.TryGetValue(DirectDeviceSlot, out var directUntil)
+                || DateTimeOffset.Now >= directUntil;
+            if (allowDirect && !DeviceBlocklist.IsBlocked(SlotId(session, DirectDeviceSlot)) &&
+                Ping(io, DirectDeviceSlot, out var directMajor, DiscoverTimeout))
+            {
+                session.EmptySlotUntil.Remove(DirectDeviceSlot);
+                session.DirectDevice = true;
+                AddDevice(session, DirectDeviceSlot, directMajor);
+            }
+            else if (allowDirect)
+            {
+                session.EmptySlotUntil[DirectDeviceSlot] = DateTimeOffset.Now + EmptySlotCooldown;
+            }
         }
 
         if (!session.DirectDevice)
@@ -265,26 +325,6 @@ public sealed class LogitechPlugin : IBatteryPlugin
                 {
                     session.EmptySlotUntil[idx] = DateTimeOffset.Now + EmptySlotCooldown;
                     if (!initial) probesThisPass++;
-                }
-            }
-        }
-
-        if (session.Devices.Count == 0)
-        {
-            bool allowDirect = initial
-                || !session.EmptySlotUntil.TryGetValue(0xFF, out var until)
-                || DateTimeOffset.Now >= until;
-            if (allowDirect && (initial || probesThisPass < 1) && !DeviceBlocklist.IsBlocked(SlotId(session, 0xFF)))
-            {
-                if (Ping(io, 0xFF, out var major, DiscoverTimeout))
-                {
-                    session.EmptySlotUntil.Remove(0xFF);
-                    session.DirectDevice = true;
-                    AddDevice(session, 0xFF, major);
-                }
-                else
-                {
-                    session.EmptySlotUntil[0xFF] = DateTimeOffset.Now + EmptySlotCooldown;
                 }
             }
         }
@@ -325,29 +365,74 @@ public sealed class LogitechPlugin : IBatteryPlugin
             session.EmptySlotUntil[idx] = DateTimeOffset.Now + EmptySlotCooldown;
     }
 
-    /// <summary>设备 ID：接收器**端口无关**路径哈希 + 槽位（换 USB 口不产生新设备）。认领、黑名单、上报三处必须同一套规则。</summary>
+    /// <summary>
+    /// 设备 ID：接收器**端口无关**路径哈希 + 槽位（换 USB 口不产生新设备）。认领、黑名单、上报三处必须同一套规则。
+    /// 已知型号（WPID）时改用型号标识 —— 无线走接收器（PID_C539）与插线走本体（PID_C08D）的
+    /// HID 路径 PID 不同、哈希必然不同，只有按型号才能把两条通道认成同一台设备。
+    /// </summary>
     private static string SlotId(ReceiverSession session, byte idx)
         => $"logitech:{PluginUtils.StableDeviceHash(session.Info.DevicePath)}:{idx}";
 
+    /// <summary>
+    /// 设备 ID（能定型号时优先型号）：同一只鼠标无线走接收器、插线走本体，HID 路径 PID 不同，
+    /// 按路径哈希会变成两台（真机 2026-11-13：E0F7…:1 与 5F2F…:255）。按型号归并后只剩一台。
+    /// </summary>
+    private static string DeviceIdFor(ReceiverSession session, byte idx, ushort? modelWpid)
+        => modelWpid is { } wpid
+            ? $"logitech:model:{wpid:X4}"
+            : SlotId(session, idx);
+
+    /// <summary>
+    /// 两套 ID 任一中黑名单即算屏蔽：发现阶段还不知道型号（只有槽位 ID），
+    /// 建立后用的是型号 ID，只判一套会让"永久移除"在另一套写法下失效。
+    /// </summary>
+    private static bool IsAnyIdBlocked(ReceiverSession session, byte idx, ushort? modelWpid)
+        => DeviceBlocklist.IsBlocked(SlotId(session, idx)) ||
+           (modelWpid is { } wpid && DeviceBlocklist.IsBlocked($"logitech:model:{wpid:X4}"));
+
     private void AddDevice(ReceiverSession session, byte idx, byte protocolMajor)
     {
+        // 槽位式黑名单（发现阶段的写法）先挡一道；型号式在拿到 WPID 后再判一次。
         if (DeviceBlocklist.IsBlocked(SlotId(session, idx))) return;
+
+        // Attach 可能被并发/连续调用两轮（真机 2026-11-13 19:18:56 两次发现只隔 24ms），
+        // 已存在的槽位必须就地复用：重建 Filter/Solver 会把读数基准和恒压段锚点一起清掉。
+        if (session.Devices.TryGetValue(idx, out var existing))
+        {
+            if (!existing.Status.IsOnline) existing.Status.IsOnline = true;
+            return;
+        }
 
         var io = session.Io!;
         string name = ReadDeviceName(io, idx) ?? $"罗技设备 {idx}";
         var kind = DeviceKind.Unknown;
         ushort? wpid = null;
+
+        // 直连设备（devIdx=0xFF）没有接收器，0x83B5 配对寄存器必然超时 —— 跳过，省 800ms 和一条告警。
         if (!session.DirectDevice &&
             TryReadPairingInfo(io, session.Info.ProductId, idx, out wpid, out var pairedKind))
         {
             kind = pairedKind;
         }
+
+        // 直连时没有配对寄存器，用本体 PID 反查型号 WPID（C08D = G502 有线模式，与接收器共用 407F 模型）。
+        if (wpid == null && session.DirectDevice)
+            wpid = HidppCatalog.WirelessPidForDirect(session.Info.ProductId) ?? session.Info.ProductId;
+
+        // 接收器通道：部分 Lightspeed 接收器对 0x83B5 直接回错误码 06（不支持），配对寄存器读不到。
+        // 单配机型的接收器可由目录声明反查型号 WPID，否则退回旧电压曲线。
+        if (wpid == null && !session.DirectDevice)
+            wpid = HidppCatalog.WirelessPidForReceiver(session.Info.ProductId);
+
         if (kind == DeviceKind.Unknown)
             kind = DeviceKindGuesser.Guess(name);
 
+        // 能定型号就用型号当 ID：无线与有线两条通道因此归并成同一台设备。
+        string deviceId = DeviceIdFor(session, idx, wpid);
+        if (DeviceBlocklist.IsBlocked(deviceId)) return;
         var status = new DeviceStatus
         {
-            Id = SlotId(session, idx),
+            Id = deviceId,
             Name = name,
             Source = DeviceSource.Hid24G,
             Kind = kind,
@@ -358,7 +443,24 @@ public sealed class LogitechPlugin : IBatteryPlugin
             Status = status,
             ProtocolMajor = protocolMajor,
             WirelessPid = wpid,
+            Model = BatteryModelCatalog.Find(wpid),
+            Filter = new BatteryReadingFilter(MaxStepPercent, FilterPersistWindow),
         };
+        if (entry.Model != null)
+        {
+            entry.Solver = new ChargingSolver(entry.Model);
+            // 冷启动就插着线时没有"上一次放电"，从历史库补锚点，才能复现 GHUB 的冻结值。
+            // 无线走接收器（logitech:<接收器哈希>:1）、插线走本体直连（logitech:<本体哈希>:255），
+            // 两个 ID 的哈希源不同、推不出来，只能按设备名前缀关联。
+            var seeded = LastDischargePercentLookup?.Invoke(status.Id);
+            if (seeded is not > 0)
+                seeded = LastLogitechDischargeLookup?.Invoke();
+            if (seeded is { } s && s is > 0 and <= 100)
+            {
+                entry.LastDischargePercent = s;
+                Log.Info($"罗技充电锚点: {status.DisplayName} 取历史放电读数 {s}%");
+            }
+        }
         // 预解析电量 feature 下标，后台通知才能按 feature 匹配（不必等下一轮 Poll）
         if (protocolMajor >= 2)
         {
@@ -601,12 +703,10 @@ public sealed class LogitechPlugin : IBatteryPlugin
             if (voltIdx != 0)
             {
                 var resp = io.Request(idx, HidppCodec.FeatureFunc(voltIdx, 0), ReadOnlySpan<byte>.Empty);
-                var curve = HidppCatalog.CurveFor(dev.WirelessPid, adcFeature: false);
-                if (resp != null &&
-                    HidppCodec.TryParseBatteryVoltage(resp, curve, out var pct, out var chg, out _))
+                if (resp != null && HidppCodec.TryParseVoltageOnly(resp, out var mv, out var chgV))
                 {
-                    ApplyBattery(status, pct, chg);
-                    return true;
+                    if (ApplyVoltage(dev, mv, chgV))
+                        return true;
                 }
             }
 
@@ -682,6 +782,62 @@ public sealed class LogitechPlugin : IBatteryPlugin
         }
     }
 
+    /// <summary>
+    /// 一帧电压 → 百分比。有官方模型时走模型（放电=库仑表，充电=充电表并锁定放电锚点作下界），
+    /// 没有则退回旧固定曲线。两条路都过 <see cref="BatteryReadingFilter"/>，异常跳变不上屏。
+    /// </summary>
+    private bool ApplyVoltage(DevEntry dev, int millivolts, ChargingState charging)
+    {
+        var status = dev.Status;
+
+        int raw;
+        if (dev.Model != null)
+        {
+            int byDischarge = dev.Model.PercentFromDischarge(millivolts);
+            if (charging is ChargingState.Charging or ChargingState.Full)
+            {
+                dev.Solver ??= new ChargingSolver(dev.Model);
+                // 锚点 = 最近一次放电读数（GHUB 插线后冻结在它上面）。没有历史则用当前放电表结果。
+                raw = dev.Solver.Feed(millivolts, dev.LastDischargePercent);
+                Log.Debug($"罗技充电求解: mv={millivolts} 锚点={dev.LastDischargePercent} 放电表={byDischarge} -> {raw}%");
+            }
+            else
+            {
+                // 拔线：记录本次放电读数作为下次插线的锚点，并作废恒压段与旧锚点。
+                dev.LastDischargePercent = byDischarge;
+                dev.Solver?.Reset();
+                raw = byDischarge;
+            }
+        }
+        else
+        {
+            var curve = HidppCatalog.CurveFor(dev.WirelessPid, adcFeature: false);
+            raw = HidppCodec.PercentFromMillivolts(millivolts, curve);
+            if (raw <= 0 && millivolts > 0) return false;
+        }
+
+        if (raw is < 0 or > 100) return false;
+
+        int percent = raw;
+        // 有官方模型时不需要跳变过滤器：放电表本身单调，ChargingSolver 已保证充电期间只升不降，
+        // 再叠一层 Filter 会把它拦成"锚点值 + 3 分钟延迟"，反而偏离 G HUB。
+        // 无模型的旧曲线才需要 Filter 兜住异常跳变。
+        if (dev.Model == null && dev.Filter != null)
+        {
+            var verdict = dev.Filter.Evaluate(raw, DateTimeOffset.Now);
+            if (verdict is ReadingVerdict.RejectAnomaly or ReadingVerdict.InvalidValue)
+            {
+                int last = dev.Filter.LastAcceptedPercent;
+                if (last >= 0) percent = last;
+            }
+        }
+
+        if (percent is < 0 or > 100) return false;
+
+        ApplyBattery(status, percent, charging);
+        return true;
+    }
+
     /// <summary>读接收器配对信息（HID++ 1.0 长寄存器 0xB5）：设备类型 + wireless PID。Unifying 子寄存器 0x20+(n-1)；Bolt 子寄存器 0x50+n。</summary>
     private static bool TryReadPairingInfo(
         HidppIO io, ushort receiverPid, byte deviceIndex,
@@ -753,7 +909,9 @@ public sealed class LogitechPlugin : IBatteryPlugin
         if (nameIdx == 0) return null;
 
         var resp = io.Request(devIdx, HidppCodec.FeatureFunc(nameIdx, 0), ReadOnlySpan<byte>.Empty); // GetCount
-        if (resp == null || resp.Length < 3 || resp[2] is 0 or > 32) return null;
+        // 上限放宽到 64：真机 G502 有线模式自报 37 字符（"G502 LIGHTSPEED Wireless Gaming Mouse"），
+        // 旧的 32 上限让它被判无效、设备名退化成"罗技设备 255"。
+        if (resp == null || resp.Length < 3 || resp[2] is 0 or > 64) return null;
         int len = resp[2];
         var chars = new char[len];
         for (byte i = 0; i < len; i++)
