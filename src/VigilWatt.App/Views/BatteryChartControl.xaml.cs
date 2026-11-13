@@ -280,11 +280,32 @@ public sealed class BatteryChartControl : UserControl
                 var prevPt = s.Points[segments[k - 1].End];
                 var curPt = s.Points[seg.Start];
                 bool dashed = seg.Incoming == ChartGaps.Link.Dashed;
+
+                double x1 = TimeToX(prevPt.Time), y1 = PctToY(prevPt.Percent);
+                double x2 = TimeToX(curPt.Time), y2 = PctToY(curPt.Percent);
+
+                if (dashed)
+                {
+                    // 面积也要补上：段与段不共享端点，只画线会在图上留下贯穿到底的白色竖条
+                    // （看着像断口，比不连更难看）。推测区间用更淡的填充区分。
+                    var gapArea = new PointCollection
+                    {
+                        new Point(x1, y1),
+                        new Point(x2, y2),
+                        new Point(x2, PadT + _plotH),
+                        new Point(x1, PadT + _plotH),
+                    };
+                    _canvas.Children.Add(new Polygon
+                    {
+                        Points = gapArea,
+                        Fill = new SolidColorBrush(Color.FromArgb(16, s.Color.R, s.Color.G, s.Color.B)),
+                    });
+                }
+
                 var bridge = new Polyline
                 {
                     Stroke = stroke,
-                    // 虚线要比实线略细但不能细到看不清（旧 1.5px 在浅色主题几乎消失）
-                    StrokeThickness = dashed ? 2 : 2,
+                    StrokeThickness = 2,
                     StrokeLineJoin = PenLineJoin.Round,
                 };
                 if (dashed)
@@ -294,8 +315,8 @@ public sealed class BatteryChartControl : UserControl
                     bridge.StrokeDashCap = PenLineCap.Round;
                     bridge.Opacity = 0.85;
                 }
-                bridge.Points.Add(new Point(TimeToX(prevPt.Time), PctToY(prevPt.Percent)));
-                bridge.Points.Add(new Point(TimeToX(curPt.Time), PctToY(curPt.Percent)));
+                bridge.Points.Add(new Point(x1, y1));
+                bridge.Points.Add(new Point(x2, y2));
                 _canvas.Children.Add(bridge);
             }
 
