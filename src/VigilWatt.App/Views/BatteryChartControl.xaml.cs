@@ -297,25 +297,6 @@ public sealed class BatteryChartControl : UserControl
                 bridge.Points.Add(new Point(TimeToX(prevPt.Time), PctToY(prevPt.Percent)));
                 bridge.Points.Add(new Point(TimeToX(curPt.Time), PctToY(curPt.Percent)));
                 _canvas.Children.Add(bridge);
-
-                if (dashed)
-                {
-                    // 虚线中点放一个小空心圈 + 「推测」标签，鼠标扫过就知道这段没采样
-                    double mx = (TimeToX(prevPt.Time) + TimeToX(curPt.Time)) / 2;
-                    double my = (PctToY(prevPt.Percent) + PctToY(curPt.Percent)) / 2;
-                    var ring = new Ellipse
-                    {
-                        Width = 7,
-                        Height = 7,
-                        Stroke = stroke,
-                        StrokeThickness = 1.5,
-                        Fill = new SolidColorBrush(Color.FromArgb(0, 0, 0, 0)),
-                        Opacity = 0.9,
-                    };
-                    Canvas.SetLeft(ring, mx - 3.5);
-                    Canvas.SetTop(ring, my - 3.5);
-                    _canvas.Children.Add(ring);
-                }
             }
 
             if (count == 1)
