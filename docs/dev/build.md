@@ -187,9 +187,27 @@ powershell -ExecutionPolicy Bypass -File scripts\build-installer.ps1
 
 安装（静默）→ 目录/快捷方式/卸载条目正确、数据目录不冲突；自动更新（把 1.0.1 nupkg 丢进 `packages\` 后启动 1.0.0 → 自动升级重启到 1.0.1）；卸载 → 安装目录/快捷方式/卸载条目/HKCU Run 残留全部清掉，用户数据保留。
 
-### 发布到 Gitee（回退源）
+### 更新源指向哪个仓库（fork 后必读）
 
-自动更新**先读 GitHub**（`github.com/evren-oct/vigil-watt`），8 秒内不可达或报错才回退 `gitee.com/YGWG-LX/vigil-watt`。两边走的是同一套 Velopack 清单：`GiteaSource` 经 `/api/v1/repos/.../releases` 列出版本（空仓库返回 `[]`，视为无新版本），Velopack 清单与包从 Release 附件下载。Gitee Release 下载路由见[官方说明](https://blog.gitee.com/2022/08/18/update/)；`vpk pack` 产出的 `releases.win.json` 与各 `.nupkg` 都要作为附件上传，确保清单引用的包都可下载。**两个仓库都要传同一份资产**，否则国内用户回退到 Gitee 时会看不到新版本。
+`UpdateService.cs` 的两个常量是**硬编码**的，决定应用去哪里查更新：
+
+| 常量 | 本 fork（`MentholTea/vigil-watt`）的取值 |
+|---|---|
+| `GitHubRepoUrl` | `https://github.com/MentholTea/vigil-watt` |
+| `GiteeRepoUrl` | 空字符串 = 不启用回退（本 fork 未在 Gitee 建仓） |
+
+**⚠️ 指向错误会让发版完全失效**：如果还指着上游 `evren-oct/vigil-watt`，应用会去读上游的最新 tag，
+判定"已是最新"，本 fork 发布的版本对用户**完全不可见**。反之如果版本号高于上游，还会造成版本倒挂——
+用户装了高版本后，上游再发新版本时反而收不到。
+
+`GiteeRepoUrl` 留空时 `CheckAsync` 直接跳过回退分支，不会白等 8 秒超时。
+以后在 Gitee 建仓了，填上地址即可恢复双源。
+
+关于页的 `AboutPage.xaml.cs` 里另有三条硬编码链接（`RepoUrl` / `ReleasesUrl` / `GitHubUrl`），同源同改。
+
+### 发布到 Gitee（回退源，本 fork 未启用）
+
+自动更新**先读 GitHub**（`github.com/MentholTea/vigil-watt`），8 秒内不可达或报错才回退 `GiteeRepoUrl`。两边走的是同一套 Velopack 清单：`GiteaSource` 经 `/api/v1/repos/.../releases` 列出版本（空仓库返回 `[]`，视为无新版本），Velopack 清单与包从 Release 附件下载。Gitee Release 下载路由见[官方说明](https://blog.gitee.com/2022/08/18/update/)；`vpk pack` 产出的 `releases.win.json` 与各 `.nupkg` 都要作为附件上传，确保清单引用的包都可下载。**两个仓库都要传同一份资产**，否则国内用户回退到 Gitee 时会看不到新版本。
 
 **一次性配置**：Gitee 个人访问令牌（需仓库写权限）。脚本只认两种来源：`-Token` 参数，或 `GITEE_TOKEN` 环境变量——**它不会自己去读令牌文件**。本机的令牌在仓库根 `.vpk-gitee-token`（已 gitignore），所以要先把它读进环境变量再跑脚本：
 

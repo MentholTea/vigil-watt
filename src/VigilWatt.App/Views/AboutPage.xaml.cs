@@ -13,9 +13,10 @@ namespace VigilWatt.App.Views;
 /// </summary>
 public sealed partial class AboutPage : Page
 {
-    private const string RepoUrl = "https://gitee.com/YGWG-LX/vigil-watt";
-    private const string ReleasesUrl = "https://github.com/evren-oct/vigil-watt/releases";
-    private const string GitHubUrl = "https://github.com/evren-oct/vigil-watt";
+    // fork 后的自有仓库；上游只作代码来源，不作为项目入口（见 UpdateService 的同类说明）
+    private const string RepoUrl = "https://github.com/MentholTea/vigil-watt";
+    private const string ReleasesUrl = "https://github.com/MentholTea/vigil-watt/releases";
+    private const string GitHubUrl = "https://github.com/MentholTea/vigil-watt";
 
     private bool _notesRendered;
 

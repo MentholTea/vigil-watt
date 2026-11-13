@@ -5,6 +5,7 @@
 
 ## 2026-11-13
 
+- **修复更新源指向上游导致发版失效**：`UpdateService` 的两个常量仍是 `evren-oct`/`YGWG-LX`。fork 到 `MentholTea/vigil-watt` 后应用会去读上游 tag 判定"已是最新"，本仓库发布的版本对用户完全不可见。改为指向本仓库；`GiteeRepoUrl` 置空（本 fork 未建 Gitee 仓），`CheckAsync` 遇到空值直接跳过回退，不再白等 8 秒。关于页三条硬编码链接同改。见 `dev/build.md` §「更新源指向哪个仓库」。
 - **罗技充电读数与 G HUB 对齐**：结论是 G HUB 充电时也用放电表，只是更新慢（4~24 分钟），不是冻结。`ChargingSolver` 改为"插线前放电值为锚点、放电表只升不降"，移除了 `<charging>`/`<charging_time_slots>` 参与显示值。原先按充电表算出的 67% 是错的——它描述"从空充到该电压"，不是当前 SoC。见 `hardware/logitech.md`。
 - **罗技电量换算改用官方电池模型**：从 `C:\ProgramData\LGHUB\depots\<build>\<modelId>\battery.xml` 取出 707 行库仑放电表，替换原 13 点粗略曲线。G HUB 自己存的 11 组 `(mV, 百分比)` 逐点回归全中。
 - **罗技设备 ID 按型号归并**：无线走接收器（PID_C539）与有线走本体（PID_C08D）HID 路径不同、哈希必然不同。改用 `logitech:model:<WPID>`，两条通道合成一台；黑名单同时判槽位式与型号式两套 ID。

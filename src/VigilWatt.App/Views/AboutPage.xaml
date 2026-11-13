@@ -122,8 +122,8 @@
                     <Grid ColumnDefinitions="*,Auto" ColumnSpacing="16" Padding="0,12">
                         <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
                             <TextBlock Text="项目" Style="{StaticResource RowTitleStyle}" />
-                            <TextBlock Text="Gitee：YGWG-LX / vigil-watt" Style="{StaticResource RowDescStyle}" />
-                            <TextBlock Text="GitHub：evren-oct / vigil-watt" Style="{StaticResource RowDescStyle}" />
+                            <TextBlock Text="GitHub：MentholTea / vigil-watt" Style="{StaticResource RowDescStyle}" />
+                            <TextBlock Text="上游：evren-oct / vigil-watt" Style="{StaticResource RowDescStyle}" />
                         </StackPanel>
                         <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8"
                                     VerticalAlignment="Center">

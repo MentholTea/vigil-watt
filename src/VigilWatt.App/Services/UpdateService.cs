@@ -11,15 +11,24 @@ namespace VigilWatt.App.Services;
 /// </summary>
 public sealed class UpdateService
 {
-    private const string GitHubRepoUrl = "https://github.com/evren-oct/vigil-watt";
-    private const string GiteeRepoUrl = "https://gitee.com/YGWG-LX/vigil-watt";
+    /// <summary>
+    /// 更新源。这是**fork 后的自有仓库**（MentholTea/vigil-watt），不是上游 evren-oct/vigil-watt：
+    /// 指向上游会让本 fork 发布的版本对用户完全不可见（应用会按上游最新 tag 判定"已是最新"）。
+    /// 上游仓库只作为代码来源，不再作为更新源。
+    /// </summary>
+    private const string GitHubRepoUrl = "https://github.com/MentholTea/vigil-watt";
+
+    /// <summary>Gitee 镜像；本 fork 暂未在 Gitee 建仓，置空即只走 GitHub，不再白等 8 秒回退。</summary>
+    private const string GiteeRepoUrl = "";
 
     // GitHub 被墙时表现为"连得上但不回包"，不设上限会一直等到 HttpClient 默认超时（100 秒），
     // 启动检查会白等；超过这个时间就直接当它不可用。
     private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(8);
 
     private readonly UpdateManager _github;
-    private readonly UpdateManager _gitee;
+
+    /// <summary>回退源；未配置时为 null，<see cref="CheckAsync"/> 直接跳过，不会白等超时。</summary>
+    private readonly UpdateManager? _gitee;
 
     // 检查成功后固定下来：delta 包必须从"给出清单的那个源"继续下载，中途换源会对不上
     private UpdateManager _active;
@@ -28,7 +37,9 @@ public sealed class UpdateService
     {
         // 匿名访问即可（公开仓库）；accessToken / downloader 传 null 用默认实现
         _github = new UpdateManager(new GithubSource(GitHubRepoUrl, null, false, null));
-        _gitee = new UpdateManager(new GiteaSource(GiteeRepoUrl, null, false, null));
+        _gitee = string.IsNullOrWhiteSpace(GiteeRepoUrl)
+            ? null
+            : new UpdateManager(new GiteaSource(GiteeRepoUrl, null, false, null));
         _active = _github;
     }
 
@@ -53,12 +64,14 @@ public sealed class UpdateService
         catch (Exception ex)
         {
             githubError = ex.Message;
+            if (_gitee == null)
+                throw new InvalidOperationException($"GitHub 更新源不可达：{ex.Message}", ex);
             Log.Warn("GitHub 更新源不可用，回退 Gitee: " + ex.Message);
         }
 
         try
         {
-            var info = await _gitee.CheckForUpdatesAsync().ConfigureAwait(false);
+            var info = await _gitee!.CheckForUpdatesAsync().ConfigureAwait(false);
             _active = _gitee;
             SourceName = "Gitee";
             return info;
