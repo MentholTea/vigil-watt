@@ -40,10 +40,8 @@ public sealed class BatteryChartControl : UserControl
 
     private IReadOnlyList<Series> _series = Array.Empty<Series>();
     private DateTimeOffset? _domainStart, _domainEnd;
-    /// <summary>实线阈值：间隔不超过它视为连续采样（采样抖动不该画成裂口）。</summary>
+    /// <summary>实线阈值：间隔不超过它视为连续采样，超过就画虚线（不再有"完全断开"档）。</summary>
     private TimeSpan _gapSolid = ChartGaps.SolidLimit;
-    /// <summary>断档阈值：超过它完全断开，中间那段画虚线（关机/拔出不能连成斜坡）。</summary>
-    private TimeSpan _gapBreak = ChartGaps.BreakLimit;
     private UIElement? _emptyState;
 
     // 最近一次渲染的几何信息，供 hover 反查（pointer x → 时间 → 最近采样点）
@@ -79,10 +77,7 @@ public sealed class BatteryChartControl : UserControl
         _series = series;
         _domainStart = domainStart;
         _domainEnd = domainEnd;
-        if (gapBreak is { } g && g > TimeSpan.Zero) _gapBreak = g;
         if (gapSolid is { } s && s > TimeSpan.Zero) _gapSolid = s;
-        // 实线阈值必须小于等于断档阈值，否则分类会互相覆盖
-        if (_gapSolid > _gapBreak) _gapSolid = _gapBreak;
         Render();
     }
 
@@ -175,35 +170,26 @@ public sealed class BatteryChartControl : UserControl
     }
 
     /// <summary>
-    /// 有虚线/断开时在右下角补一行说明。虚线段的含义（"这里没采样、是连线推测"）看图画不出来，
+    /// 有虚线段时在右下角补一行说明。虚线的含义（"这里没采样、是连线推测"）看图画不出来，
     /// 不写一句用户只会以为是渲染瑕疵。
     /// </summary>
     private void RenderGapHint(Brush brush)
     {
-        int dashed = 0, broken = 0;
+        int dashed = 0;
         foreach (var s in _series)
         {
             if (s.Points.Count < 2) continue;
-            var segs = ChartGaps.Split(s.Points, p => p.Time, _gapSolid, _gapBreak);
+            var segs = ChartGaps.Split(s.Points, p => p.Time, _gapSolid);
             for (int k = 1; k < segs.Count; k++)
             {
-                if (segs[k].Incoming == ChartGaps.Link.Dashed) dashed++;
-                else if (segs[k].Incoming == ChartGaps.Link.Break) broken++;
+                if (segs[k].Incoming != ChartGaps.Link.Solid) dashed++;
             }
         }
-        if (dashed == 0 && broken == 0) return;
+        if (dashed == 0) return;
 
+        double mins = _gapSolid.TotalMinutes;
         var sb = new StringBuilder();
-        if (dashed > 0)
-        {
-            double mins = _gapSolid.TotalMinutes;
-            sb.Append($"虚线 {dashed} 段：间隔超过 {mins:0} 分钟无采样，按首尾连线推测");
-        }
-        if (broken > 0)
-        {
-            if (sb.Length > 0) sb.Append("　·　");
-            sb.Append($"断开 {broken} 处：超过 {_gapBreak.TotalHours:0} 小时无采样（关机/拔出）");
-        }
+        sb.Append($"虚线 {dashed} 段：间隔超过 {mins:0} 分钟无采样，按首尾连线推测");
 
         var hint = MakeLabel(sb.ToString(), brush, 10);
         hint.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
@@ -267,19 +253,21 @@ public sealed class BatteryChartControl : UserControl
         bool drawDots = s.Points.Count <= 40;
 
         var segments = ChartGaps.Split(
-            s.Points, p => p.Time, _gapSolid, _gapBreak);
+            s.Points, p => p.Time, _gapSolid);
 
         for (int k = 0; k < segments.Count; k++)
         {
             var seg = segments[k];
             int count = seg.End - seg.Start + 1;
 
-            // 先画"从上一段连过来"的那条线：虚线弱化表示推测，断开则什么都不画
-            if (k > 0 && seg.Incoming != ChartGaps.Link.Break)
+            // 从上一段连过来：短间隔实线，长间隔（含整夜空档）一律虚线相连。
+            // 曲线宁可连起来也不要断开——断口会把走势切碎，看不出"睡前 50%、早上 48%"的连续关系；
+            // 虚线的含义由图下方的说明承担，用户扫一眼就知道这段没采样。
+            if (k > 0)
             {
                 var prevPt = s.Points[segments[k - 1].End];
                 var curPt = s.Points[seg.Start];
-                bool dashed = seg.Incoming == ChartGaps.Link.Dashed;
+                bool dashed = seg.Incoming != ChartGaps.Link.Solid;
 
                 double x1 = TimeToX(prevPt.Time), y1 = PctToY(prevPt.Percent);
                 double x2 = TimeToX(curPt.Time), y2 = PctToY(curPt.Percent);
