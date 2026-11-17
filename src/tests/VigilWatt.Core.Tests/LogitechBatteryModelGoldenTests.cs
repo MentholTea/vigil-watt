@@ -117,4 +117,18 @@ public class LogitechBatteryModelGoldenTests
         // 19:47 电压回落到 4170mV，只升不降。
         Assert.Equal(100, solver.Feed(4170, 92));
     }
+
+    [Fact]
+    public void G8_恒压段按时间表推进_真机20261117_12h35()
+    {
+        // G HUB 自己在 settings.db 记下 12:35:44 → 4192mV / 76%，正好是时间表第 14 分钟那一格。
+        var t = new DateTimeOffset(2026, 11, 17, 12, 21, 0, TimeSpan.FromHours(8));
+        var solver = new ChargingSolver(Real, () => t);
+        solver.Feed(4101, 18);
+        solver.Feed(4102, 18);              // 1mV 变化 → 稳定态，起点 = 12:21
+
+        t = t.AddMinutes(14);               // 12:35
+        Assert.Equal(76, Real.TimeSlots.PercentAtMinute(14));
+        Assert.Equal(76, solver.Feed(4192, 18));
+    }
 }

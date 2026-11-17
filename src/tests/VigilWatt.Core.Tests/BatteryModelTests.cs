@@ -169,4 +169,50 @@ public class BatteryModelTests
         Assert.Equal(SampleModel().PercentFromCharging(3929), pct);
         Assert.True(pct < 60, "充电表在 3.929V 应给出低值，而不是放电表的 70%");
     }
+
+    [Fact]
+    public void M14_恒压段稳定后按时间表推进()
+    {
+        // 电压过 4100 且相邻采样变化 ≤3mV 才算稳定；稳定后每 30 秒按时间表推进，不再看电压。
+        var t = new DateTimeOffset(2026, 11, 17, 12, 0, 0, TimeSpan.FromHours(8));
+        var solver = new ChargingSolver(SampleModel(), () => t);
+
+        solver.Feed(4101, 0);
+        Assert.Null(solver.StableSince);
+
+        Assert.Equal(66, solver.Feed(4103, 0));
+        Assert.NotNull(solver.StableSince);
+
+        t = t.AddMinutes(14);
+        Assert.Equal(74, solver.Feed(4192, 0));
+
+        t = t.AddMinutes(26);
+        Assert.Equal(90, solver.Feed(4192, 0));
+    }
+
+    [Fact]
+    public void M15_电压掉出门限后计时作废_重回充电表()
+    {
+        var t = new DateTimeOffset(2026, 11, 17, 12, 0, 0, TimeSpan.FromHours(8));
+        var solver = new ChargingSolver(SampleModel(), () => t);
+        solver.Feed(4101, 0);
+        solver.Feed(4103, 0);
+        Assert.NotNull(solver.StableSince);
+
+        solver.Feed(4050, 0);
+        Assert.Null(solver.StableSince);
+    }
+
+    [Fact]
+    public void M16_拔线Reset清掉恒压段计时()
+    {
+        var t = new DateTimeOffset(2026, 11, 17, 12, 0, 0, TimeSpan.FromHours(8));
+        var solver = new ChargingSolver(SampleModel(), () => t);
+        solver.Feed(4101, 0);
+        solver.Feed(4103, 0);
+
+        solver.Reset();
+        Assert.Null(solver.StableSince);
+        Assert.Equal(-1, solver.Anchor);
+    }
 }

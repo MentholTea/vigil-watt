@@ -90,13 +90,30 @@ HID++ 1.0/2.0 协议发现（无型号白名单）。电量级联：
 **实现**（`ChargingSolver`）：
 
 1. **锚点** = 插线前最后一次放电读数（可回填历史库，见下）。起点就用它，不从电压重算。
-2. 每帧用**充电表**算 `byCharging`，只升不降：`if (byCharging > Current)` 才推进。
+2. 每帧用**充电表**算 `byCharging`，与**恒压段时间表**取大，只升不降：`if (target > Current)` 才推进。
 3. 电压到表顶（4.2V）判满 100%——充电表在那里只给平台首行 68%，物理上到顶就是满。
-4. 拔线调 `Reset()`，清空锚点，下次插线重新锚定。
+4. 拔线调 `Reset()`，清空锚点与恒压段计时，下次插线重新锚定。
 
-**`<charging_time_slots>` 暂未参与**：它是恒压段经验时间表（1 分钟 66% → 88 分钟 99%），
-要用它得知道"进入平台的时刻"，而本项目一分钟才采一帧，起点误差就有几分钟。
-现在靠锚点 + 4.2V 判满覆盖这一段，与 G HUB 的差距在 8 点以内。
+**`<charging_time_slots>` 接管恒压段**：电压 ≥ `stable_state_detection_voltage`(4100) 且相邻两帧变化 ≤
+`stable_state_minimum_voltage_change`(3mV) 才算稳定，从那一刻起每 30 秒按时间表推进，不再看电压。
+真机验证：11-17 12:21 进入稳定态，12:35（第 14 分钟）G HUB 记下 `4192mV / 76%`，正好是表里第 14 分钟那一格。
+电压掉回门限以下 → 计时作废，回到充电表。
+
+**官方规范来源**（2026-11-17 从本机 G HUB 提取）：
+
+- 表：`C:\ProgramData\LGHUB\depots\<build>\<device>\battery.xml`（本机 `887386\g502_wireless`，15861 字节）
+- 算法字段：`lghub_agent.exe` 里 `battery_model_voltage::parse_battery` 解析
+  `discharge` / `charging` / `charging_time_slots` / `charging_top_off` / `charging_topping` / `direct` /
+  `relaxation_threshold_voltage` / `supports_reading_offset` / `ascending` / `descending` / `battery_model` / `nominal_voltage`
+- 换算函数：`get_voltage_discharge_map`、`get_voltage_soc_map`、`get_time_soc_map`；
+  状态推进在 `battery_handler_voltage::_updateBatteryState`
+- `charging_time_slots` 的可选参数（见 XML 注释原文，G502 只配了前两个）：
+  `stable_state_check_period_in_minute`（默认 1）、`average_voltage_sample_count`、
+  `average_voltage_sample_period_in_second`、`equation_coefficiency`（涨 1% 所需秒数）、
+  `gap_fill_speed`（稳定态已达但当前百分比低于表起点时，每 30 秒补齐一点）
+
+本项目目前实现了前两个参数 + 时间表推进；`average_voltage_*`、`gap_fill_speed`、`equation_coefficiency`
+和 `relaxation_threshold_voltage` 仍未实现，G502 的 XML 也没配这些字段，等遇到配了的机型再补。
 
 **旧结论作废**：2026-11-13 曾据 `LGHUB\settings.db-WAL` 四条记录（4084→92、4088→92、4170→100、4201→100）
 判定"充电也用放电表"。那四条都在 90% 以上高电量段，放电表值与锚点恰好同值，区分不了两张表；
