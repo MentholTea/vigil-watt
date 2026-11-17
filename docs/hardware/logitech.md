@@ -115,6 +115,94 @@ HID++ 1.0/2.0 协议发现（无型号白名单）。电量级联：
 本项目目前实现了前两个参数 + 时间表推进；`average_voltage_*`、`gap_fill_speed`、`equation_coefficiency`
 和 `relaxation_threshold_voltage` 仍未实现，G502 的 XML 也没配这些字段，等遇到配了的机型再补。
 
+### agent 内部实现（反汇编，2026-11-17）
+
+方法：capstone 线性反汇编 + PE `.pdata` 函数边界（391329 个函数）+ 字符串 xref 定位。
+Ghidra 对这个 100MB 二进制导入 330s / 1800s 两档都超时，未采用；`/pdb` 指向构建机
+`C:\builds\kragle\...\lghub_agent.pdb`，本机没有。
+
+**函数地图**（RVA，ImageBase `0x140000000`）：
+
+| RVA | 内容 |
+|---|---|
+| `0x246e690` | `battery_model_voltage::parse_battery`，解析 XML 全部 12 个字段 |
+| `0x246fc50` | 恒压段状态机，返回下次采样间隔（毫秒） |
+| `0x23e1bb0` | `battery_handler_voltage::_updateBatteryState` |
+| `0x2d404f0` | `get_time_soc_map`（错误路径包装，不是计算本体） |
+
+**`charging_time_slots` 结构体布局**（解析时写入，`r13` 为基址）：
+
+| 偏移 | 字段 | 类型 |
+|---|---|---|
+| `+0x6C` | stable_state_detection_voltage | float |
+| `+0x70` | stable_state_minimum_voltage_change | float |
+| `+0x74` | stable_state_check_period_in_minute | int32，缺省 1 |
+| `+0x78` | average_voltage_sample_count | int32，缺省 1 |
+| `+0x7C` | average_voltage_sample_period_in_second | float |
+| `+0x80` | equation_coefficiency | float |
+| `+0x84` | gap_fill_speed | float |
+
+**状态机 `0x246fc50` 还原**（`state` 在 `+0xC8`，`acc` 在 `+0xD0`，`count` 在 `+0xCC`，上次时刻在 `+0xD8`）：
+
+```
+case 0:  detect_voltage(+0x6C) <= millivolts 且 frame[+8] != 0  -> state 1
+case 1:  返回 sample_period(+0x7C) * 1000 ms        （开始累积平均）
+case 2:  acc += millivolts; count++
+         count 达到 avg_count(+0x78) 后求平均 avg
+         若距上次(+0xD8) >= check_period(+0x74)*60000 ms
+            且 min_change(+0x70) > (avg - last_avg)    -> state 3（稳定）
+         否则重开一轮并返回剩余等待时间
+case 3:  每 60000 ms 一拍
+```
+
+**百分比平滑**（`0x23e20EE`~`0x23e2219`，最终写 `this+0x2A4`）：
+充电时取 `max(新值, 旧值)`，放电时取 `min(新值, 旧值)`，另有一层防抖分支。
+
+### 电压→SoC 本体（2026-11-17 继续挖到）
+
+**对象与 vtable**：`battery_handler_voltage` 构造函数 `0x23e0a90` 里
+`operator new(0xF0)` → 构造函数 `0x246c960` → 存进 `[this+0x348]`（模型对象 240 字节）。
+`0x246c960` 首行 `mov [rcx], <vtable>`，vtable = `0x42414F0`：
+
+| vtable 项 | 函数 | 作用 |
+|---|---|---|
+| `+0x00` | `0x246cc70` | 析构 |
+| `+0x08` | `0x246e690` | `parse_battery` |
+| `+0x10` | `0x246f200` | **取 SoC**（`_updateBatteryState` 里 `call [rax+0x10]`） |
+| `+0x18` | `0x246fb70` | 返回常量 `0xEA60`（60000ms，采样周期） |
+
+**`0x246f200`（109 字节）**：`mv = frame->millivolts * <常数>` → 若 `frame[+8]`(充电) 且 `frame[+0xb]==0`
+就调 `0x246f480(this, mv)`，否则跳默认路径；随后按 `frame[+9]`/`frame[+a]` 决定是否用固定值覆盖。
+
+**`0x246f480`（1769 字节）**：模型对象里的两张 std::map（红黑树，节点 key 在 `+0x1C`、value 在 `+0x20`）：
+
+| 字段 | 内容 |
+|---|---|
+| `+0x30` | 电压(mV) → SoC(%) |
+| `+0x50` | 时间(分钟) → SoC(%)，即 `charging_time_slots` |
+| `+0x68` | 充电标志 |
+| `+0xC4` | topping 标志 |
+| `+0xC8` | 状态机 state（`==3` 才算稳） |
+| `+0x98` | 缓存的 SoC |
+| `+0x9C` | 计时计数 |
+
+**判定顺序**：`state != 3` → 直接返回电压查表值；`state == 3` 且 `[+0xC4]==0` 才进表逻辑；
+当前 SoC `> 表首(66) - 1` → 仍返回电压查表值；否则进 **gap fill**，周期常量 `0x7530` = 30000ms（30 秒），
+`gap_fill_speed(+0x84) == 0`（G502 没配）时不按速度爬，直接返回"表首 - 1"。
+
+> 与现有实现的差别：`ChargingSolver` 是"电压过 4100 且稳定 → 直接从时间表第 0 分钟（66%）起算"，
+> 官方是"稳定态 + 当前 SoC 越过表首才切表，否则先 gap fill 到表首-1"。两者只在切入瞬间差 1 点，
+> 但**切表条件不同**（官方看 SoC 不看电压门限），遇到低电量长充电的机型会拉开差距。
+> 见 `docs/reviews/BACKLOG.md` 是否要按官方条件改写。
+
+> **还没定死的一环**：`charging_time_slots` 按分钟取值的位置不在 `0x246f480` 里（`[+0x50]` 只被取了
+> 三次 begin()，都用于 gap fill 判定），G HUB 12:35 实测的 76%（= 表里第 14 分钟）应该由
+> `_updateBatteryState` 里 `[rsp+0x58]` 那条支路产生，尚未追到。
+
+> **对本项目的影响**：`average_voltage_sample_count` 与 `stable_state_check_period_in_minute` 在 G502 的 XML 里
+> 都没配，缺省分别是 1 和 1 分钟 —— 即"单次采样就是均值、相邻两帧就是判定"，与
+> `ChargingSolver.TablePercent` 现在的写法等价，**不需要改代码**。换成配了多采样的机型才要补平均窗口。
+
 **旧结论作废**：2026-11-13 曾据 `LGHUB\settings.db-WAL` 四条记录（4084→92、4088→92、4170→100、4201→100）
 判定"充电也用放电表"。那四条都在 90% 以上高电量段，放电表值与锚点恰好同值，区分不了两张表；
 11-17 的低电量样本（18% 插线）才暴露差异。
