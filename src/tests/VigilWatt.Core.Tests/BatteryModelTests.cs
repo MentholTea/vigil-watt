@@ -103,11 +103,11 @@ public class BatteryModelTests
     }
 
     [Fact]
-    public void M7_充电也用放电表_与GHUB一致()
+    public void M7_充电用充电表而不是放电表()
     {
-        // G HUB 四条实测记录全部等于放电表：4084→92、4088→92、4170→100、4201→100。
+        // 同一电压两张表差半个表：3929mV 放电表约 70%，充电表 10%（真机 11-17 的 83 vs 22 同理）。
         var solver = new ChargingSolver(SampleModel());
-        Assert.Equal(solver.Feed(3929, 0), SampleModel().PercentFromDischarge(3929));
+        Assert.Equal(SampleModel().PercentFromCharging(3929), solver.Feed(3929, 0));
     }
 
     [Fact]
@@ -121,9 +121,9 @@ public class BatteryModelTests
     }
 
     [Fact]
-    public void M9_电压升高后用放电表推进_真机1946场景()
+    public void M9_电压到表顶判满_真机1946场景()
     {
-        // 19:22 插线 92% -> 19:46 电压 4201mV，放电表 100% -> 显示 100%
+        // 19:22 插线 92% -> 19:46 电压 4201mV（表顶 4.2V）-> 100%，与 G HUB 一致。
         var solver = new ChargingSolver(SampleModel());
         solver.Feed(4084, 92);
         int later = solver.Feed(4201, 92);
@@ -161,12 +161,12 @@ public class BatteryModelTests
     }
 
     [Fact]
-    public void M13_无历史时用当前放电表兜底()
+    public void M13_无历史时用当前充电表兜底()
     {
-        // 首次上线就是充电态、历史库也没记录：只能信当前放电表（不是充电表）。
+        // 首次上线就是充电态、历史库也没记录：只能用充电表，不能退回被极化电压读高的放电表。
         var solver = new ChargingSolver(SampleModel());
         int pct = solver.Feed(3929, 0);
-        Assert.Equal(SampleModel().PercentFromDischarge(3929), pct);
-        Assert.True(pct > 60, "放电表在 3.929V 应给出 60% 以上，而不是充电表的 10%");
+        Assert.Equal(SampleModel().PercentFromCharging(3929), pct);
+        Assert.True(pct < 60, "充电表在 3.929V 应给出低值，而不是放电表的 70%");
     }
 }

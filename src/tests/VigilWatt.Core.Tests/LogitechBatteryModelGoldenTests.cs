@@ -95,4 +95,26 @@ public class LogitechBatteryModelGoldenTests
         Assert.Null(BatteryModelCatalog.Find(null));
         Assert.NotNull(BatteryModelCatalog.Find(0x407F));
     }
+
+    [Fact]
+    public void G6_低电量插线_充电表对齐GHUB_真机20261117()
+    {
+        // 11-17 11:46 插线：放电表读到 4009mV 会报 83%，G HUB 当时 25%，充电表给 22%。
+        var solver = new ChargingSolver(Real);
+        Assert.Equal(83, Real.PercentFromDischarge(4009));
+        Assert.Equal(22, Real.PercentFromCharging(4009));
+        Assert.Equal(22, solver.Feed(4009, 18));
+    }
+
+    [Fact]
+    public void G7_高电量插线_锚点托住下限_真机20261113()
+    {
+        // 19:22 插线前 92%（4084mV 充电表只有 42%）：显示值不能被充电表拉下来。
+        var solver = new ChargingSolver(Real);
+        Assert.Equal(92, solver.Feed(4084, 92));
+        // 19:46 电压到 4.201V 表顶，判满 100%（G HUB 同步显示 100%）。
+        Assert.Equal(100, solver.Feed(4201, 92));
+        // 19:47 电压回落到 4170mV，只升不降。
+        Assert.Equal(100, solver.Feed(4170, 92));
+    }
 }

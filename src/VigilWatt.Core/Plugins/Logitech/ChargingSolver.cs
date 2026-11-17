@@ -3,9 +3,9 @@ using VigilWatt.Core.Models;
 namespace VigilWatt.Core.Plugins.Logitech;
 
 /// <summary>
-/// 功 能： 与 G HUB 一致的充电读数：以插线前放电值为起点，用放电表只升不降地推进。
+/// 功 能： 与 G HUB 一致的充电读数：以插线前放电值为起点，用充电电压表只升不降地推进。
 /// 2026/11/13 20:12:00 fred1
-/// 四条真机记录的依据见 docs/hardware/logitech.md §电池模型。
+/// 2026/11/17 12:20:00 fred1 改用充电表（放电表把极化电压读高半个表），见 docs/hardware/logitech.md §充电读数。
 /// </summary>
 internal sealed class ChargingSolver
 {
@@ -31,30 +31,24 @@ internal sealed class ChargingSolver
 
     /// <summary>
     /// 充电中给一帧电压。<paramref name="lastDischargePercent"/> 是插线前最后的放电读数。
-    ///
-    /// G HUB 实测（2026-11-13，四条记录）：
-    /// <list type="bullet">
-    /// <item>19:22 插线，4084mV → 显示 92%（= 插线前放电值，不是此刻电压换算的 92.2 独立值，巧合一致）</item>
-    /// <item>19:46 电压 4201mV → 显示 100%（放电表 100%，此时才涨）</item>
-    /// <item>19:47 电压回落到 4170mV → 仍显示 100%（放电表 99.6→100，不回退）</item>
-    /// </list>
-    /// 也就是：**起点锁在插线前读数，之后用放电表只升不降**（G HUB 更新很慢，4~24 分钟一次，
-    /// 所以插线后头几分钟看着像"冻结在 92%"）。
+    /// 充电表读极化电压，锚点托住下限；到 4.2V 表顶才判满，见 docs/hardware/logitech.md §充电读数。
     /// </summary>
     public int Feed(int millivolts, int lastDischargePercent)
     {
-        int byDischarge = _model.PercentFromDischarge(millivolts);
+        int byCharging = _model.PercentFromCharging(millivolts);
+
+        // 表顶（4.2V）在充电表里只给平台首行 68，物理上到顶就是满，时间表那 43 行同电压分辨不出。
+        if (_model.Charging.Count > 0 && millivolts >= _model.Charging[^1].Millivolts) byCharging = 100;
 
         if (_anchor < 0)
         {
-            // 插线前读数优先（真机 92%）；没有历史才用当前放电表结果兜底。
-            _anchor = lastDischargePercent > 0 ? lastDischargePercent : byDischarge;
+            // 插线前读数优先；冷启动就插着线（无历史）才用充电表结果兜底。
+            _anchor = lastDischargePercent > 0 ? lastDischargePercent : byCharging;
             CurrentPercent = _anchor;
         }
 
-        // 只升不降：电压被极化抬高时放电表可能已经 100%，但那不是"真的充满了"，
-        // 只允许它把显示值往上推，绝不允许往下拉。
-        if (byDischarge > CurrentPercent) CurrentPercent = byDischarge;
+        // 只升不降：电压回落时不回退，也不允许锚点被低值拉下去。
+        if (byCharging > CurrentPercent) CurrentPercent = byCharging;
 
         CurrentPercent = Math.Clamp(CurrentPercent, 0, 100);
         return CurrentPercent;

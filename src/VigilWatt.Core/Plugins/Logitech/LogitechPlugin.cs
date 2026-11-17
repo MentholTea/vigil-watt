@@ -797,9 +797,10 @@ public sealed class LogitechPlugin : IBatteryPlugin
             if (charging is ChargingState.Charging or ChargingState.Full)
             {
                 dev.Solver ??= new ChargingSolver(dev.Model);
-                // 锚点 = 最近一次放电读数（GHUB 插线后冻结在它上面）。没有历史则用当前放电表结果。
+                // 锚点 = 最近一次放电读数（GHUB 插线后冻结在它上面）。没有历史则用当前充电表结果。
                 raw = dev.Solver.Feed(millivolts, dev.LastDischargePercent);
-                Log.Debug($"罗技充电求解: mv={millivolts} 锚点={dev.LastDischargePercent} 放电表={byDischarge} -> {raw}%");
+                int byCharging = dev.Model.PercentFromCharging(millivolts);
+                Log.Debug($"罗技充电求解: mv={millivolts} 锚点={dev.LastDischargePercent} 充电表={byCharging} 放电表={byDischarge} -> {raw}%");
             }
             else
             {
